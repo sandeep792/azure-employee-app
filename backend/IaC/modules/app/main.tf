@@ -11,7 +11,7 @@ resource "azurerm_service_plan" "plan" {
   resource_group_name = var.resource_group_name
   location            = var.location
   os_type             = "Linux"
-  sku_name            = "Y1" #"EP1" # Elastic Premium required for VNet integration private endpoint reachability typically, or Standard. Consumption VNet integration is possible now but sometimes tricky. I'll use EP1 for enterprise.
+  sku_name            = "EP1" # Elastic Premium required for VNet integration private endpoint reachability typically, or Standard. Consumption VNet integration is possible now but sometimes tricky. I'll use EP1 for enterprise.
 }
 
 resource "azurerm_linux_function_app" "func" {
