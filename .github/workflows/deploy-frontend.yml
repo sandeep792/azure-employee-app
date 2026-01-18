@@ -1,0 +1,105 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'frontend/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - test
+        - prod
+
+env:
+  TF_WORKING_DIR: 'frontend/IaC'
+  NODE_VERSION: '18.x'
+  ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
+    outputs:
+      storage_account_name: ${{ steps.tf_outputs.outputs.storage_account_name }}
+      resource_group_name: ${{ steps.tf_outputs.outputs.resource_group_name }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: |
+        terraform init \
+          -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+          -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=frontend-${{ env.ENVIRONMENT }}.tfstate"
+
+    - name: Terraform Apply
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: terraform apply -auto-approve -var-file="environments/${{ env.ENVIRONMENT }}.tfvars"
+      # IMPORTANT: Use unique remote state keys per environment.
+    
+    - name: Get Terraform Outputs
+      id: tf_outputs
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: |
+        echo "storage_account_name=$(terraform output -raw storage_account_name)" >> $GITHUB_OUTPUT
+        echo "resource_group_name=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
+
+  build-and-deploy:
+    needs: infrastructure
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Build Frontend
+      working-directory: frontend
+      run: |
+        npm install
+        npm run build
+      env:
+        # Load environment specific API URL secret if available
+        VITE_API_URL: ${{ secrets.VITE_API_URL }}
+
+    - name: Upload to Azure Storage Blob
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          az storage blob upload-batch \
+            --account-name ${{ needs.infrastructure.outputs.storage_account_name }} \
+            --auth-mode key \
+            --destination '$web' \
+            --source frontend/dist \
+            --overwrite

@@ -1,0 +1,101 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'backend/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - test
+        - prod
+
+env:
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: 'backend' 
+  NODE_VERSION: '20.x'
+  TF_WORKING_DIR: 'backend/IaC'
+  # Determine environment from branch or input
+  ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
+    outputs:
+      function_app_name: ${{ steps.tf_outputs.outputs.function_app_name }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: |
+        terraform init \
+          -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+          -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=backend-${{ env.ENVIRONMENT }}.tfstate"
+
+    - name: Terraform Apply
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: terraform apply -auto-approve -var-file="environments/${{ env.ENVIRONMENT }}.tfvars"
+      # Note: For production, ensure you are using a backend (e.g. Azure Storage) 
+      # and that the state key is unique per environment e.g. "backend-dev.tfstate"
+    
+    - name: Get Terraform Outputs
+      id: tf_outputs
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: |
+        echo "function_app_name=$(terraform output -raw function_app_name)" >> $GITHUB_OUTPUT
+
+  build-and-deploy:
+    needs: infrastructure
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref == 'refs/heads/main' && 'prod' || 'dev') }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: 'Resolve Project Dependencies Using Npm'
+      shell: bash
+      run: |
+        pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
+        npm install
+        npm run build --if-present
+        npm prune --production
+        popd
+
+    - name: 'Run Azure Functions Action'
+      uses: Azure/functions-action@v1
+      with:
+        app-name: ${{ needs.infrastructure.outputs.function_app_name }}
+        package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
