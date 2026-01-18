@@ -31,6 +31,8 @@ extensions.csproj
 *.tfstate
 *.tfstate.backup
 *.tfvars
+!backend/IaC/environments/*.tfvars
+!frontend/IaC/environments/*.tfvars
 .terraform.lock.hcl
 tfplan
 
